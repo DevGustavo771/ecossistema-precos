@@ -34,6 +34,32 @@ st.set_page_config(
     layout="wide"
 )
 
+# ============================
+# COMENTARIOS
+# ============================
+def classificar_motivo(row):
+    obs = [] # Começa com uma lista vazia
+
+    # 1. Verifica se ficou no piso (IPCA)
+    # Compara se a meta é igual ao financeiro (com pequena margem de tolerância, por conta do arredondamento)
+    if abs(row["reajuste_meta"] - row["indice_financeiro"]) < 0.001:
+        obs.append("IPCA")
+
+    # 2. Verifica Problema de Preço (Projeção futura ruim)
+    if row["reaj_preco"] > row["indice_financeiro"]:
+        obs.append("Problema de Preço")
+
+    # 3. Verifica Problema de Custo (Variação do Custo Médio positiva)
+    # Usa pd.notna para garantir que não é um erro de cálculo (NaN)
+    if pd.notna(row.get("var_cm")) and row["var_cm"] > 0:
+        obs.append("Problema de Custo")
+
+    # --- RESULTADO FINAL ---
+    if len(obs) == 0:
+        return "Em Análise" # Se não caiu em nenhuma regra
+    else:
+        return " + ".join(obs) # Junta tudo: "IPCA + Problema de Custo"
+
 # =============================
 # BASE DE PRODUTOS
 # =============================
@@ -82,7 +108,6 @@ def obter_ponto_equilibrio(vidas):
     else:
         return 0.82
 
-
 # =============================
 # FUNÇÃO CENTRAL DE RECÁLCULO
 # =============================
@@ -110,6 +135,11 @@ def recalcular_reajustes(df):
     df["reaj_preco"] = df[
         ["reaj_preco", "indice_financeiro"]
     ].max(axis=1)
+    
+    df["var_cm"] = (
+      df["custo_assistencial_bruto"].replace(0, pd.NA)
+     /   df["custo_projetado"].replace(0, pd.NA)
+     ) - 1
 
     df["reajuste_meta"] = (
         (
@@ -143,6 +173,10 @@ def recalcular_reajustes(df):
         ["reajuste_comercial", "indice_financeiro"]
     ].max(axis=1)
 
+    df["obs"] = df.apply(classificar_motivo, axis=1)
+    
+    df["ind_aporte"] = df["ponto_equilibrio"].apply(lambda x: "S" if x != 0.75 else "N")
+
     return df
 
 
@@ -162,8 +196,11 @@ ORDEM_COLUNAS = [
     "ponto_equilibrio",
     "reajuste_meta",
     "reajuste_comercial",
-    "reaj_preco"
-]
+    "reaj_preco",
+    "var_cm",
+    "obs",
+    "ind_aporte"
+    ]
 
 # "valor_receita_faturada_fator_moderador_esp017",
 # "custo_assistencial_bruto",
@@ -181,10 +218,103 @@ st.markdown("""
 # =============================
 # TABS
 # =============================
-tab_pricing, tab_arquivos = st.tabs([
+tab_pricing, tab_arquivos, tab_doc = st.tabs([
     "💰 Pricing",
-    "📂 Reajuste por Arquivos"
+    "📂 Reajuste por Arquivos",
+    "💾 Memória de Cálculo"
 ])
+
+# =============================
+# TAB DOCUMENTAÇÃO / MEMÓRIA
+# =============================
+with tab_doc:
+    st.markdown("## 📚 Parâmetros e Referências")
+    
+    col1, col2 = st.columns([1, 1])
+
+    # --- 1. TABELA DE CUSTO MÉDIO ---
+    with col1:
+        st.subheader("1. Tabela de Custo Médio (CM)")
+        st.caption("Utilizada para calcular o Custo Projetado baseado no perfil etário.")
+        
+        st.dataframe(BASE_CM, use_container_width=True, hide_index=True)
+
+    # --- 2. REGRA DO PONTO DE EQUILÍBRIO ---
+    with col2:
+        st.subheader("2. Regra do Ponto de Equilíbrio")
+        st.caption("Percentual divisor (Break-even) definido pelo porte da empresa (Vidas).")
+        
+        # Cria um dataframe na hora só para exibir
+        df_regras_pe = pd.DataFrame([
+            {"Vidas": "0 a 199", "Ponto Equilíbrio": "75%"},
+            {"Vidas": "200 a 499", "Ponto Equilíbrio": "78%"},
+            {"Vidas": "500 a 999", "Ponto Equilíbrio": "80%"},
+            {"Vidas": "1.000 ou mais", "Ponto Equilíbrio": "82%"},
+        ])
+        st.table(df_regras_pe)
+
+    st.markdown("---")
+    st.markdown("## 🧮 Glossário de Fórmulas")
+    st.caption("Abaixo estão detalhadas todas as lógicas matemáticas aplicadas na função `recalcular_reajustes`.")
+
+    # --- 3. REAJUSTE META ---
+    with st.expander("🔹 Reajuste Meta", expanded=True):
+        st.markdown("""
+        O cálculo busca equilibrar o contrato considerando um **Break-even fixo de 75%**, independentemente do tamanho da empresa. 
+        É comparado com o índice financeiro (o maior dos dois prevalece).
+        """)
+        st.latex(r'''
+        \text{Meta} = \left[ \frac{(\text{Custo Líquido} - \text{MV} - \text{Expurgo})}{\text{Receita Assistencial} \times 0.75} \right] \times (1 + \text{Ind. Financeiro}) - 1
+        ''')
+        st.info("**Nota:** Se o resultado da fórmula for menor que o Índice Financeiro, aplica-se o Financeiro.")
+
+    # --- 4. REAJUSTE COMERCIAL ---
+    with st.expander("🔹 Reajuste Comercial", expanded=True):
+        st.markdown("""
+        Similar à Meta, mas utiliza o **Ponto de Equilíbrio Variável** (conforme tabela acima) como divisor.
+        Favorece empresas maiores que possuem um break-even mais alto.
+        """)
+        st.latex(r'''
+        \text{Comercial} = \left[ \frac{(\text{Custo Líquido} - \text{MV} - \text{Expurgo})}{\text{Receita Assistencial} \times \text{Ponto de Equilíbrio}} \right] \times (1 + \text{Ind. Financeiro}) - 1
+        ''')
+
+    # --- 5. REAJUSTE PREÇO ---
+    with st.expander("🔹 Reajuste Preço (Projeção)", expanded=False):
+        st.markdown("""
+        Calculado com base na **Projeção Futura** (Custo Projetado via Tabela CM). 
+        O objetivo é cobrir o custo projetado mantendo a margem de 75%.
+        """)
+        st.markdown("**Passo 1: Projetar o Fator Moderador**")
+        st.latex(r'''
+        \text{FatModProj} = \left( \frac{\text{Fat. Moderador Real}}{\text{Custo Bruto Real}} \right) \times \text{Custo Projetado}
+        ''')
+        
+        st.markdown("**Passo 2: Calcular Reajuste Necessário**")
+        st.latex(r'''
+        \text{Reaj. Preço} = \left( \frac{\text{Custo Projetado} - \text{FatModProj}}{\text{Receita Sem Reajuste}} \div 0.75 \right) - 1
+        ''')
+
+    # --- 6. INDICADORES AUXILIARES ---
+    with st.expander("🔹 Indicadores Auxiliares (Sinistralidade, Var CM, Aporte)", expanded=False):
+        col_a, col_b, col_c = st.columns(3)
+        
+        with col_a:
+            st.markdown("**Sinistralidade**")
+            st.latex(r'''
+            \frac{\text{Custo Líquido}}{\text{Receita Assistencial}}
+            ''')
+        
+        with col_b:
+            st.markdown("**Variação CM (Custo Médio)**")
+            st.latex(r'''
+            \left( \frac{\text{Custo Bruto Real}}{\text{Custo Projetado}} \right) - 1
+            ''')
+            st.caption("Se > 0, o custo real superou o esperado pela tabela.")
+
+        with col_c:
+            st.markdown("**Indicador de Aporte**")
+            st.write("Verifica se a empresa é elegivel a aporte.")
+            st.code('Se Ponto Equilíbrio != 75% -> "S"\nCaso contrário -> "N"')
 
 # =============================
 # TAB PRICING
@@ -459,73 +589,100 @@ with tab_arquivos:
        # ---------------------------------------------------------
        # CORREÇÃO 1: SALVAR O DATAFRAME COMPLETO (SEM FILTRAR)
        # ---------------------------------------------------------
-       # Não fazemos df_corp = df_corp[ORDEM_COLUNAS] aqui!
-       # Salvamos ele "sujo" (com todas as colunas de cálculo)
+     
         st.session_state["df_corp"] = df_corp.copy()
 
-        st.subheader("📊 Resultado por Corporação")
     
-       # Filtramos APENAS na hora de mostrar na tela
-        st.dataframe(df_corp[ORDEM_COLUNAS], use_container_width=True)
-
        # ==================================================
-       # AJUSTES MANUAIS (COM FORM)
-       # ==================================================
-       # Recupera o DataFrame COMPLETO (com as colunas de cálculo) da memória
-df_corp_full = st.session_state.get("df_corp")
+        # 1. CONFIGURAÇÃO DA TABELA EDITÁVEL
+        # ==================================================
+        # Define a coluna 'motivo' como Texto e trava as outras
+        col_config = {
+            "obs": st.column_config.TextColumn(
+                "Motivo do Reajuste",
+                help="Classificação automática. Clique para editar.",
+                width="medium",
+                required=True
+            )
+        }
+        # Trava todas as colunas numéricas para não serem alteradas sem querer
+        cols_travadas = [c for c in ORDEM_COLUNAS if c != "obs"]
 
-if df_corp_full is not None:
-
-    # Usa o df completo para calcular elegibilidade
-    df_corp_full["elegivel_ajuste"] = (
-        (df_corp_full["reajuste_meta"] >= 0.15) &
-        (df_corp_full["vidas"] >= 200)
-    )
-
-    df_ajustes_base = df_corp_full.loc[
-        df_corp_full["elegivel_ajuste"],
-        ["id_corporacao", "empresa", "ajuste_mv", "expurgo"]
-    ].copy()
-
-    st.subheader("✏️ Ajustes Manuais (MV e Expurgo)")
-    st.caption("Somente corporações com reajuste meta ≥ 15% e ≥ 200 vidas.")
-
-    with st.form("form_ajustes"):
-        df_ajustes = st.data_editor(
-            df_ajustes_base,
-            num_rows="fixed",
-            use_container_width=True
-        )
-        submitted = st.form_submit_button("🔄 Recalcular com Ajustes Manuais")
-
-    if submitted:
-        # Faz o merge no DataFrame COMPLETO
-        df_corp_full = df_corp_full.merge(
-            df_ajustes,
-            on=["id_corporacao", "empresa"],
-            how="left",
-            suffixes=("", "_edit")
-        )
-
-        # Atualiza valores
-        df_corp_full["ajuste_mv"] = df_corp_full["ajuste_mv_edit"].fillna(df_corp_full["ajuste_mv"])
-        df_corp_full["expurgo"] = df_corp_full["expurgo_edit"].fillna(df_corp_full["expurgo"])
-
-        df_corp_full.drop(
-            columns=["ajuste_mv_edit", "expurgo_edit"],
-            inplace=True
-        )
-
-        # ---------------------------------------------------------
-        # CORREÇÃO 2: RECALCULAR COM A BASE COMPLETA
-        # ---------------------------------------------------------
-        # Agora funciona, pois df_corp_full ainda tem 'custo_projetado', etc.
-        df_corp_full = recalcular_reajustes(df_corp_full)
+        # ==================================================
+        # 2. EXIBIÇÃO PRINCIPAL (Visualização)
+        # ==================================================
+        st.subheader("📊 Resultado por Corporação")
         
-        # Atualiza o Session State com a nova versão COMPLETA
-        st.session_state["df_corp"] = df_corp_full.copy()
+        # Como não precisa editar, usamos o dataframe simples
+        st.dataframe(
+            df_corp[ORDEM_COLUNAS],
+            use_container_width=True,
+            hide_index=True
+        )
 
-        st.success("Reajustes recalculados com sucesso ✅")
-        
-        # Filtra APENAS na visualização final
-        st.dataframe(df_corp_full[ORDEM_COLUNAS], use_container_width=True)
+        # ==================================================
+        # 3. AJUSTES MANUAIS (COM FORM)
+        # ==================================================
+        # Recupera o DataFrame COMPLETO da memória (agora já com o "obs" atualizado)
+        df_corp_full = st.session_state.get("df_corp")
+
+        if df_corp_full is not None:
+
+            # Usa o df completo para calcular elegibilidade
+            df_corp_full["elegivel_ajuste"] = (
+                (df_corp_full["reajuste_meta"] >= 0.15) &
+                (df_corp_full["vidas"] >= 200)
+            )
+
+            df_ajustes_base = df_corp_full.loc[
+                df_corp_full["elegivel_ajuste"],
+                ["id_corporacao", "empresa", "ajuste_mv", "expurgo"]
+            ].copy()
+
+            st.subheader("✏️ Ajustes Manuais (MV e Expurgo)")
+            st.caption("Somente corporações com reajuste meta ≥ 15% e ≥ 200 vidas.")
+
+            with st.form("form_ajustes"):
+                df_ajustes = st.data_editor(
+                    df_ajustes_base,
+                    num_rows="fixed",
+                    use_container_width=True
+                )
+                submitted = st.form_submit_button("🔄 Recalcular com Ajustes Manuais")
+
+            if submitted:
+                # Faz o merge no DataFrame COMPLETO
+                df_corp_full = df_corp_full.merge(
+                    df_ajustes,
+                    on=["id_corporacao", "empresa"],
+                    how="left",
+                    suffixes=("", "_edit")
+                )
+
+                # Atualiza valores de MV e Expurgo
+                df_corp_full["ajuste_mv"] = df_corp_full["ajuste_mv_edit"].fillna(df_corp_full["ajuste_mv"])
+                df_corp_full["expurgo"] = df_corp_full["expurgo_edit"].fillna(df_corp_full["expurgo"])
+
+                df_corp_full.drop(
+                    columns=["ajuste_mv_edit", "expurgo_edit"],
+                    inplace=True
+                )
+
+                # ---------------------------------------------------------
+                # RECALCULAR COM A BASE COMPLETA
+                # ---------------------------------------------------------
+                # Nota: Não rodamos a classificação de "obs" aqui para não
+                # sobrescrever o que você acabou de editar manualmente na tabela de cima.
+                df_corp_full = recalcular_reajustes(df_corp_full)
+                
+                # Salva o resultado no session state
+                st.session_state["df_corp"] = df_corp_full.copy()
+
+                st.success("Reajustes recalculados com sucesso ✅")
+                
+                # Exibe a tabela final atualizada (apenas visualização)
+                st.dataframe(
+                    df_corp_full[ORDEM_COLUNAS],
+                    use_container_width=True,
+                    hide_index=True
+                )
