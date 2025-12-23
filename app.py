@@ -627,30 +627,67 @@ with tab_arquivos:
         df_corp_full = st.session_state.get("df_corp")
 
         if df_corp_full is not None:
+   
+          # 1. Cria condições lógicas separadas para ficar organizado
+        
+          # Condição A: Contratos Grandes (>= 1000 vidas)
+          # Habilita MV independente do reajuste
+         
+         condicao_grandes = (df_corp_full["vidas"] >= 1000) 
+         
+         #Condição B: Contratos Médios com Reajuste Alto (>= 200 vidas E Meta >= 15%)
+         # Habilita MV e Expurgo
+         
+         condicao_critica = (df_corp_full["vidas"] >= 200) & (df_corp_full["reajuste_meta"] >= 0.15)   
+         
+         # 2. Combina as condições (Lógica OU)
+         # A empresa é elegível para aparecer na tabela se atender A OU B
+         
+         df_corp_full["elegivel_ajuste"] = condicao_grandes | condicao_critica
+         
+         # 3. Filtra o DataFrame para edição
+         df_ajustes_base = df_corp_full.loc[
+            df_corp_full["elegivel_ajuste"],
+            ["id_corporacao", "empresa", "vidas", "reajuste_meta", "ajuste_mv", "expurgo"]
+         ].copy() # Adicionei 'vidas' e 'meta' para você conferir visualmente na hora de editar
 
-            # Usa o df completo para calcular elegibilidade
-            df_corp_full["elegivel_ajuste"] = (
-                (df_corp_full["reajuste_meta"] >= 0.15) &
-                (df_corp_full["vidas"] >= 200)
-            )
+         st.subheader("✏️ Ajustes Manuais (MV e Expurgo)")
+         
+         # Atualiza a legenda para refletir a nova regra complexa
+         st.info("""
+        **Regras de Exibição:**
+        * **Ajuste MV:** Liberado para contratos com **≥ 1000 vidas** (qualquer reajuste) **OU** contratos com **≥ 200 vidas e Meta ≥ 15%**.
+        * **Expurgo:** Aplicável somente para contratos com **≥ 200 vidas e Meta ≥ 15%**.
+        """)
 
-            df_ajustes_base = df_corp_full.loc[
-                df_corp_full["elegivel_ajuste"],
-                ["id_corporacao", "empresa", "ajuste_mv", "expurgo"]
-            ].copy()
+         
+         
+            # # Usa o df completo para calcular elegibilidade
+            # df_corp_full["elegivel_ajuste"] = (
+            #     (df_corp_full["reajuste_meta"] >= 0.15) &
+            #     (df_corp_full["vidas"] >= 200)
+            # )
 
-            st.subheader("✏️ Ajustes Manuais (MV e Expurgo)")
-            st.caption("Somente corporações com reajuste meta ≥ 15% e ≥ 200 vidas.")
+            # df_ajustes_base = df_corp_full.loc[
+            #     df_corp_full["elegivel_ajuste"],
+            #     ["id_corporacao", "empresa", "ajuste_mv", "expurgo"]
+            # ].copy()
 
-            with st.form("form_ajustes"):
+            # st.subheader("✏️ Ajustes Manuais (MV e Expurgo)")
+            # st.caption("Somente corporações com reajuste meta ≥ 15% e ≥ 200 vidas.")
+        cols_bloqueadas = [col for col in df_ajustes_base.columns if col not in ["ajuste_mv", "expurgo"]]
+
+        with st.form("form_ajustes"):
                 df_ajustes = st.data_editor(
                     df_ajustes_base,
                     num_rows="fixed",
-                    use_container_width=True
+                    use_container_width=True,
+                    disabled=cols_bloqueadas,
+                    hide_index=True
                 )
                 submitted = st.form_submit_button("🔄 Recalcular com Ajustes Manuais")
 
-            if submitted:
+        if submitted:
                 # Faz o merge no DataFrame COMPLETO
                 df_corp_full = df_corp_full.merge(
                     df_ajustes,
